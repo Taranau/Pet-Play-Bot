@@ -1,23 +1,40 @@
+# ------Libraries------
+import re
+# --------Types--------
 from typing import (
     Optional, 
     Literal
     )
-
 from PetCalendarBot.common.types import (
     MarkdownString,
     EventLinks,
     EventDetails
 )
+# --------Code---------
 
-def _PreprocessUserInput(user_input: str|None) -> MarkdownString:
-    if user_input is None:
+def _escape_special_characters(input: str) -> str:
+    escaped_input: str = input
+    for char in ['.', '!', '-', '(', ')', '=', '{', '}']:
+        escaped_input = escaped_input.replace(char, '\\'+char)
+    escaped_input = escaped_input.replace("\\\\", "\\")
+    return escaped_input
+
+def _format_hyperlinks(input: str) -> str:
+    formatted_input = input
+    embeds = list(re.finditer(pattern=r"]\(.*\)", string=formatted_input))
+    for i in range(0, len(embeds), 2):
+        embed = embeds.pop()
+        formatted_input = formatted_input[:embed.start()+i+1] + formatted_input[embed.start()+i+2:embed.end()+i-1] + formatted_input[embed.end()+i:]
+    return formatted_input
+
+def _preprocess_message(user_input: Optional[str]) -> MarkdownString:
+    if not user_input:
         return ''
-    formatted_message = user_input
-    for char in ['.','!','-','(',')']:
-        formatted_message = formatted_message.replace(char, '\\'+char)
+    escaped_input = _escape_special_characters(user_input)
+    formatted_message = _format_hyperlinks(escaped_input)
     return formatted_message
 
-def _Header(event: EventDetails, update_type: str) -> MarkdownString:
+def _header(event: EventDetails, update_type: str) -> MarkdownString:
     '''Constructs the message header.
     
     Parameters
@@ -48,14 +65,14 @@ def _Header(event: EventDetails, update_type: str) -> MarkdownString:
     header = (f'[{event["name"]}]({link}) :: ' if link 
               else f'{event["name"]} :: ')
 
-    header += (f'[{event["city"]}]({event["addressLink"]}) :: ' if event['addressLink']
-               else f'{event["city"]} :: ')
+    header += (f'[{event["location"]}]({event["addressLink"]}) :: ' if event['addressLink']
+               else f'{event["location"]} :: ')
     header += f'**{update_type}**\n'
 
-    header += '\-'*20 + f'\n'
+    header += '-'*20 + f'\n'
     return header
 
-def _Footer(event: EventDetails) -> MarkdownString:
+def _footer(event: EventDetails) -> MarkdownString:
     '''Constructs the message footer.
     
     Parameters
@@ -79,10 +96,10 @@ def _Footer(event: EventDetails) -> MarkdownString:
         `Questions? Corrections? Contact @AAderyn`
 
         Where contact points are given, they will be hyperlinked. Written with Telegram markdown.'''
-    footer: MarkdownString = f'\n' + '\-'*20 + f'\nFor more details:\n'
+    footer: MarkdownString = f'\n' + '-'*20 + f'\nFor more details:\n'
     # Adds links to the socials for the event contact, if they exist
     if (event_contact := event['contact']):
-        footer += f'Contact {event_contact["name"]} \({event_contact["pronouns"]}\) '
+        footer += f'Contact {event_contact["name"]} ({event_contact["pronouns"]}) '
 
         organiser_links: list[str] = []
         if (tg_handle:=event_contact['telegramHandle']):
@@ -105,18 +122,30 @@ def _Footer(event: EventDetails) -> MarkdownString:
         if (fl_link:=event_links['fetlifeLink']):
             social_links.append(f'[FetLife]({fl_link})')
         if (os_link:=event_links['otherSocialLink']):
-            social_links.append(f'[another site]({os_link})')
+            social_links.append(f'[their social media]({os_link})')
+        if (ow_link:=event_links['otherLink']):
+            social_links.append(f'[their website]({ow_link})')
         if social_links:
             footer += ', or '.join(social_links)
         footer += f'\n'
 
+    if price:= event['ticketPrice']:
+        if price == 'Free':
+            footer += 'Tickets are free'
+        else:
+            footer += f'Tickets cost {price}'
+        if link:=event['ticketLink']:
+            footer += f', and are available here: {link}'
+        footer += f'\n'
+
+
     # If there's neither links to the event nor a contact point, suggests you message Taranau
     if not event['contact'] and not event['links']:
-        footer += f'@AAderyn might be able to help, but no guarantees\.'
+        footer += '@AAderyn might be able to help, but no guarantees.'
     return footer
 
 
-def NewEvent(event: EventDetails) -> MarkdownString:
+def new_event(event: EventDetails, date: Optional[str] = None) -> MarkdownString:
     '''Constructs a Telegram message for new events.
     
     Parameters
@@ -128,12 +157,19 @@ def NewEvent(event: EventDetails) -> MarkdownString:
     -------
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
-    message: MarkdownString = _Header(event, 'New event')
-    message += f'A new petplay event is starting in {event["city"]}\!'
-    message += _Footer(event)
+    message: MarkdownString = _header(event, 'New event')
+    if (location := event['location']) == 'Online':
+        message += f'A new petplay event is starting online!'
+    elif location == 'UK wide':
+        message += f'A new UK-wide petplay event is starting!'
+    else:
+        message += f'A new petplay event is starting in {event["location"]}!'
+    if date:
+        message += f'\nThe first meet is on {date}.'
+    message += _footer(event)
     return message
 
-def VenueChange(event: EventDetails, 
+def venue_change(event: EventDetails, 
                  new_venue: str, 
                  temporary: bool = False, 
                  date: Optional[str] = None) -> MarkdownString:
@@ -154,13 +190,13 @@ def VenueChange(event: EventDetails,
     -------
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
-    message: str = _Header(event, 'Temporary venue '*temporary + 'Venue '*(not temporary) + 'change')
-    message += f'{event["name"]} has '+ 'temporarily '*temporary+ f'moved to {new_venue}\.'
-    message += f'\nDate: {_PreprocessUserInput(date)}'*(temporary and bool(date))
-    message += _Footer(event)
+    message: str = _header(event, 'Temporary venue '*temporary + 'Venue '*(not temporary) + 'change')
+    message += f'{event["name"]} has '+ 'temporarily '*temporary+ f'moved to {new_venue}.'
+    message += f'\nDate: {_preprocess_message(date)}'*(temporary and bool(date))
+    message += _footer(event)
     return message
 
-def NewVenueAndDates(event: EventDetails, new_venue: str, new_dates: list[str]) -> MarkdownString:
+def new_venue_and_dates(event: EventDetails, new_venue: str, new_dates: list[str]) -> MarkdownString:
     '''Constructs a Telegram message for a new venue, together with dates for the venue.
     
     Parameters
@@ -178,16 +214,16 @@ def NewVenueAndDates(event: EventDetails, new_venue: str, new_dates: list[str]) 
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
     plural: bool = (not len(new_dates) == 1)
-    message: MarkdownString = _Header(event, 'New venue and date' +'s'*plural)
+    message: MarkdownString = _header(event, 'New venue and date' +'s'*plural)
     message += f'{event["name"]} has moved to a new venue: {new_venue}\n'
 
     message += 'New date' + 's'*plural + f':'
     for date in new_dates:
-        message += f'\n• {_PreprocessUserInput(date)}'
-    message += _Footer(event)
+        message += f'\n• {_preprocess_message(date)}'
+    message += _footer(event)
     return message
 
-def NewDates(event: EventDetails, new_dates: list[str]) -> MarkdownString:
+def new_dates(event: EventDetails, new_dates: list[str]) -> MarkdownString:
     '''Constructs a Telegram message with new dates for an event.
     
     Parameters
@@ -202,15 +238,15 @@ def NewDates(event: EventDetails, new_dates: list[str]) -> MarkdownString:
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
     plural: bool = (not len(new_dates) == 1)
-    message: MarkdownString = _Header(event, 'New date' +'s'*plural)
+    message: MarkdownString = _header(event, 'New date' +'s'*plural)
 
     message += 'New date' + 's'*plural + f':'
     for date in new_dates:
-        message += f'\n• {_PreprocessUserInput(date)}'
-    message += _Footer(event)
+        message += f'\n• {_preprocess_message(date)}'
+    message += _footer(event)
     return message    
 
-def DateChange(event: EventDetails, old_date: str, new_date: str) -> MarkdownString:
+def date_change(event: EventDetails, old_date: str, new_date: str) -> MarkdownString:
     '''Constructs a Telegram message for an event change of date.
     
     Parameters
@@ -224,12 +260,12 @@ def DateChange(event: EventDetails, old_date: str, new_date: str) -> MarkdownStr
     -------
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
-    message: MarkdownString = _Header(event, 'Date change')
-    message += f'The {event["name"]} social on {_PreprocessUserInput(old_date)} has moved to {_PreprocessUserInput(new_date)}\.'
-    message += _Footer(event)
+    message: MarkdownString = _header(event, 'Date change')
+    message += f'The {event["name"]} social on {_preprocess_message(old_date)} has moved to {_preprocess_message(new_date)}.'
+    message += _footer(event)
     return message
 
-def TimingChange(event: EventDetails, date: str, old_times: str, new_times: str) -> MarkdownString:
+def timing_change(event: EventDetails, date: str, old_times: str, new_times: str) -> MarkdownString:
     '''Constructs a Telegram message for an event change of time.
     
     Parameters
@@ -243,12 +279,12 @@ def TimingChange(event: EventDetails, date: str, old_times: str, new_times: str)
     -------
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
-    message: MarkdownString = _Header(event, 'Timing change')
-    message += f'The {event["name"]} social on {_PreprocessUserInput(date)}, which was previously at {_PreprocessUserInput(old_times)}, will now be at {_PreprocessUserInput(new_times)}\.'
-    message += _Footer(event)
+    message: MarkdownString = _header(event, 'Timing change')
+    message += f'The {event["name"]} social on {_preprocess_message(date)}, which was previously at {_preprocess_message(old_times)}, will now be at {_preprocess_message(new_times)}.'
+    message += _footer(event)
     return message
 
-def EventCancelled(event: EventDetails, date: str | Literal['Next']) -> MarkdownString:
+def event_cancelled(event: EventDetails, date: str | Literal['Next']) -> MarkdownString:
     '''Constructs a Telegram message for an event cancellation.
     
     Parameters
@@ -263,16 +299,16 @@ def EventCancelled(event: EventDetails, date: str | Literal['Next']) -> Markdown
     -------
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
-    message: MarkdownString = _Header(event, 'Cancelled')
+    message: MarkdownString = _header(event, 'Cancelled')
     if date == 'Next':
-        message += f'The next {event["name"]} has been cancelled\.'
+        message += f'The next {event["name"]} has been cancelled.'
     else:
-        message += f'The {event["name"]} social on {_PreprocessUserInput(date)} has been cancelled\.'
+        message += f'The {event["name"]} social on {_preprocess_message(date)} has been cancelled.'
 
-    message += _Footer(event)
+    message += _footer(event)
     return message
 
-def EventShutDown(event: EventDetails, permanent: bool = False) -> MarkdownString:
+def event_shut_down(event: EventDetails, permanent: bool = False) -> MarkdownString:
     '''Constructs a Telegram message for an event shutting down.
     
     Parameters
@@ -287,18 +323,18 @@ def EventShutDown(event: EventDetails, permanent: bool = False) -> MarkdownStrin
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
 
-    message: MarkdownString = (_Header(event, 'Permanent shut down') if permanent 
-                    else _Header(event, 'Temporary shut down'))
+    message: MarkdownString = (_header(event, 'Permanent shut down') if permanent 
+                    else _header(event, 'Temporary shut down'))
 
     if permanent:
-        message += f'{event["name"]} social is no longer running\.'
+        message += f'{event["name"]} social is no longer running.'
     else:
-        message += f'All {event["name"]} events suspended until further notice\.'
+        message += f'All {event["name"]} events suspended until further notice.'
 
-    message += _Footer(event)
+    message += _footer(event)
     return message
 
-def Other(event: EventDetails, text: str) -> MarkdownString:
+def other(event: EventDetails, text: str) -> MarkdownString:
     '''Constructs a Telegram message for miscellaneous event happenings.
     
     Parameters
@@ -313,12 +349,12 @@ def Other(event: EventDetails, text: str) -> MarkdownString:
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
 
-    message: MarkdownString = _Header(event, 'Other')
-    message += _PreprocessUserInput(text)
-    message += _Footer(event)
+    message: MarkdownString = _header(event, 'Other')
+    message += _preprocess_message(text)
+    message += _footer(event)
     return message
 
-def Meta(widget: str, text: str) -> MarkdownString:
+def meta(widget: str, text: str) -> MarkdownString:
     '''Constructs a Telegram message for meta events, e.g. an update to the map, or a new widget.
     
     Parameters
@@ -333,6 +369,6 @@ def Meta(widget: str, text: str) -> MarkdownString:
     message : MarkdownString
         A message with header and footer, written with Telegram markdown.'''
 
-    message: MarkdownString = f'{widget} :: **Meta**\n' + '\-'*20 + '\n'
-    message += _PreprocessUserInput(text)
+    message: MarkdownString = f'{widget} :: **Meta**\n' + '-'*20 + '\n'
+    message += _preprocess_message(text)
     return message
